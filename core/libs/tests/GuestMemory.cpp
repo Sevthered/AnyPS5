@@ -1211,6 +1211,52 @@ static void CheckAliasLeavesResidentRunsUnderAHostWrite() {
     Require(sceKernelReleaseDirectMemory(phys, page * 2) == 0);
 }
 
+static void CheckAliasKeepsZeroAndWrittenPagesOfAResidentRun() {
+    constexpr std::size_t page = 0x4000;
+    constexpr std::size_t pages = 6;
+    std::int64_t phys = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * pages, 0, 0, &phys) == 0);
+    void* mapped = nullptr;
+    Require(sceKernelMapDirectMemory(&mapped, page * pages, 3, 0, phys, 0) == 0);
+    MEMORY_BASIC_INFORMATION resident{};
+    Require(VirtualQuery(mapped, &resident, sizeof(resident)) == sizeof(resident) && resident.Type == MEM_PRIVATE);
+    auto* bytes = static_cast<volatile unsigned char*>(mapped);
+    bytes[0] = 0x11;
+    bytes[page + 7] = 0x22;
+    bytes[page + 7] = 0;
+    bytes[page * 4 - 1] = 0x33;
+    bytes[page * 4 + 0x1000] = 0x44;
+    const auto expected = [&](std::size_t offset) -> unsigned char {
+        if (offset == 0) return 0x11;
+        if (offset == page * 4 - 1) return 0x33;
+        if (offset == page * 4 + 0x1000) return 0x44;
+        return 0;
+    };
+    auto* alias = static_cast<volatile unsigned char*>(GuestArena::GuestArenaMapAlias_nid_postfix(reinterpret_cast<std::uintptr_t>(mapped), page * pages));
+    Require(alias != nullptr);
+    for (std::size_t index = 0; index < pages; ++index) {
+        MEMORY_BASIC_INFORMATION view{};
+        auto* address = static_cast<unsigned char*>(mapped) + page * index;
+        Require(VirtualQuery(address, &view, sizeof(view)) == sizeof(view) && view.Type == MEM_MAPPED && view.AllocationBase == address);
+    }
+    for (std::size_t offset = 0; offset < page * pages; ++offset) Require(bytes[offset] == expected(offset) && alias[offset] == expected(offset));
+    alias[page * 2 + 9] = 0x55;
+    Require(bytes[page * 2 + 9] == 0x55);
+    bytes[page * 5 + 9] = 0x66;
+    Require(alias[page * 5 + 9] == 0x66);
+    GuestArena::GuestArenaUnmapAlias_nid_postfix(const_cast<unsigned char*>(alias));
+    Require(sceKernelMunmap(mapped, page * pages) == 0);
+    void* again = nullptr;
+    Require(sceKernelMapDirectMemory(&again, page * pages, 3, 0, phys, 0) == 0);
+    const auto* data = static_cast<const volatile unsigned char*>(again);
+    for (std::size_t offset = 0; offset < page * pages; ++offset) {
+        const unsigned char written = offset == page * 2 + 9 ? 0x55 : offset == page * 5 + 9 ? 0x66 : expected(offset);
+        Require(data[offset] == written);
+    }
+    Require(sceKernelMunmap(again, page * pages) == 0);
+    Require(sceKernelReleaseDirectMemory(phys, page * pages) == 0);
+}
+
 static void CheckAliasRefusesPagesThatAreNotSharedViews() {
     constexpr std::size_t page = 0x4000;
     std::int64_t phys = 0;
@@ -2597,6 +2643,7 @@ int main(int argc, char** argv) {
     CheckAliasOfReorderedSharedPages();
     CheckAliasRefusesPagesThatAreNotSharedViews();
     CheckAliasLeavesResidentRunsUnderAHostWrite();
+    CheckAliasKeepsZeroAndWrittenPagesOfAResidentRun();
 #endif
     CheckUnhintedKernelMappingsLandInTheWindow();
 #if defined(__linux__)

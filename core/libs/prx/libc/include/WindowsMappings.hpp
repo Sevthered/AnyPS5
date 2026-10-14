@@ -618,12 +618,18 @@ private:
         const auto section = views.at(start).section;
         auto window = open(section->handle, views.at(start).offset, stop - start);
         if (query(reinterpret_cast<std::uintptr_t>(window.bytes)).State == MEM_RESERVE && !VirtualAlloc(window.bytes, stop - start, MEM_COMMIT, PAGE_READWRITE)) fail("commit direct memory pages");
-        std::memcpy(window.bytes, reinterpret_cast<const void*>(start), stop - start);
+        for (auto page = start; page < stop; page += pageBytes) {
+            auto& slot = *views.at(page).slot;
+            if (!slot.stored && blank(page)) continue;
+            slot.stored = true;
+            std::memcpy(window.bytes + (page - start), reinterpret_cast<const void*>(page), pageBytes);
+        }
         close(window);
         if (!VirtualFree(reinterpret_cast<void*>(start), stop - start, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) fail("release resident guest pages");
         for (auto page = start; page < stop; page += pageBytes) {
             auto& view = views.at(page);
-            split(page, pageBytes);
+            if (page + pageBytes == stop) split(page, pageBytes);
+            else if (!VirtualFree(reinterpret_cast<void*>(page), pageBytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) fail("split guest placeholder suffix");
             mapShared(page, view.section->handle, view.offset, view.protection);
             view.slot->stored = true;
             view.resident = false;
